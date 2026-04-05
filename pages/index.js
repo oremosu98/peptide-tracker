@@ -624,11 +624,20 @@ function LoginScreen() {
     const token = code.trim();
     if (token.length !== 6) return setErr('Enter the 6-digit code from your email.');
     setLoading(true); setErr('');
-    const { error } = await supabase.auth.verifyOtp({
+    // try 'email' first (OTP flow), fall back to 'magiclink' if needed
+    let result = await supabase.auth.verifyOtp({
       email: email.trim(),
       token,
       type: 'email',
     });
+    if (result.error) {
+      result = await supabase.auth.verifyOtp({
+        email: email.trim(),
+        token,
+        type: 'magiclink',
+      });
+    }
+    const { error } = result;
     setLoading(false);
     if (error) { setErr('Invalid or expired code. Try again.'); }
   }
