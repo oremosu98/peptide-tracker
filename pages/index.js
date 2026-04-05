@@ -605,19 +605,38 @@ function PeptideModal({ peptide, onSave, onDelete, onClose }) {
 function LoginScreen() {
   const [email,   setEmail]   = useState('');
   const [sent,    setSent]    = useState(false);
+  const [code,    setCode]    = useState('');
   const [loading, setLoading] = useState(false);
   const [err,     setErr]     = useState('');
 
-  async function sendLink() {
+  async function sendCode() {
     if (!email.trim()) return setErr('Enter your email address.');
     setLoading(true); setErr('');
     const { error } = await supabase.auth.signInWithOtp({
       email: email.trim(),
-      options: { emailRedirectTo: window.location.origin },
     });
     setLoading(false);
     if (error) { setErr(error.message); return; }
     setSent(true);
+  }
+
+  async function verifyCode() {
+    const token = code.trim();
+    if (token.length !== 6) return setErr('Enter the 6-digit code from your email.');
+    setLoading(true); setErr('');
+    const { error } = await supabase.auth.verifyOtp({
+      email: email.trim(),
+      token,
+      type: 'email',
+    });
+    setLoading(false);
+    if (error) { setErr('Invalid or expired code. Try again.'); }
+  }
+
+  function reset() {
+    setSent(false);
+    setCode('');
+    setErr('');
   }
 
   return (
@@ -631,8 +650,24 @@ function LoginScreen() {
           <div className="login-sent">
             <div className="sent-icon">📬</div>
             <p className="sent-title">Check your email</p>
-            <p className="sent-sub">We sent a magic link to <strong>{email}</strong>.<br/>Tap it to sign in — no password needed.</p>
-            <button className="login-resend" onClick={()=>setSent(false)}>Use a different email</button>
+            <p className="sent-sub">We sent a 6-digit code to <strong>{email}</strong>. Enter it below.</p>
+            <input
+              className="login-input otp-input"
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={6}
+              placeholder="000000"
+              value={code}
+              onChange={e=>setCode(e.target.value.replace(/\D/g,''))}
+              onKeyDown={e=>e.key==='Enter'&&verifyCode()}
+              autoFocus
+            />
+            {err && <div className="login-err">{err}</div>}
+            <button className="login-btn" onClick={verifyCode} disabled={loading}>
+              {loading ? 'Verifying…' : 'Verify code →'}
+            </button>
+            <button className="login-resend" onClick={reset}>Use a different email</button>
           </div>
         ) : (
           <>
@@ -642,13 +677,13 @@ function LoginScreen() {
               placeholder="your@email.com"
               value={email}
               onChange={e=>setEmail(e.target.value)}
-              onKeyDown={e=>e.key==='Enter'&&sendLink()}
+              onKeyDown={e=>e.key==='Enter'&&sendCode()}
               autoComplete="email"
               autoFocus
             />
             {err && <div className="login-err">{err}</div>}
-            <button className="login-btn" onClick={sendLink} disabled={loading}>
-              {loading ? 'Sending…' : 'Send magic link →'}
+            <button className="login-btn" onClick={sendCode} disabled={loading}>
+              {loading ? 'Sending…' : 'Send code →'}
             </button>
           </>
         )}
@@ -850,6 +885,7 @@ export default function PeptideTracker() {
         .sent-title { font-size:16px; font-weight:700; }
         .sent-sub { font-size:13px; color:var(--text-mid); line-height:1.6; }
         .login-resend { background:none; border:none; color:var(--accent-light); font-size:13px; font-weight:600; cursor:pointer; text-decoration:underline; touch-action:manipulation; }
+        .otp-input { text-align:center; font-size:28px; font-weight:700; letter-spacing:8px; }
         .login-footer { font-size:12px; color:var(--text-dim); margin-top:20px; text-align:center; }
 
         /* ── Layout ── */
