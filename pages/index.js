@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import Head from 'next/head';
+import { supabase } from '../lib/supabase';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const DAYS     = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
@@ -20,7 +21,7 @@ const VIEWS = [
 ];
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-const uid     = () => Math.random().toString(36).slice(2,10);
+const uid      = () => Math.random().toString(36).slice(2,10);
 const todayStr = () => new Date().toISOString().slice(0,10);
 const todayDay = () => DAYS[((new Date().getDay() + 6) % 7)];
 const fmtTime  = iso => iso ? new Date(iso).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
@@ -39,11 +40,57 @@ function calcUnits(vialMg, bacMl, doseMcg) {
   };
 }
 
-function load(key, fallback) {
-  if (typeof window === 'undefined') return fallback;
-  try { return JSON.parse(localStorage.getItem(key) || 'null') ?? fallback; } catch { return fallback; }
+// DB row → app object
+function dbToPeptide(r) {
+  return {
+    id:       r.id,
+    name:     r.name,
+    doseMcg:  r.dose_mcg,
+    vialMg:   r.vial_mg,
+    bacMl:    r.bac_ml,
+    days:     r.days     || [],
+    sessions: r.sessions || ['AM'],
+    color:    r.color,
+    active:   r.active,
+    notes:    r.notes || '',
+  };
 }
-const save = (key, val) => localStorage.setItem(key, JSON.stringify(val));
+function peptideToDb(p, userId) {
+  return {
+    id:       p.id,
+    user_id:  userId,
+    name:     p.name,
+    dose_mcg: p.doseMcg,
+    vial_mg:  p.vialMg,
+    bac_ml:   p.bacMl,
+    days:     p.days,
+    sessions: p.sessions,
+    color:    p.color,
+    active:   p.active,
+    notes:    p.notes,
+  };
+}
+function dbToLog(r) {
+  return {
+    id:        r.id,
+    peptideId: r.peptide_id,
+    date:      r.date,
+    session:   r.session,
+    taken:     r.taken,
+    takenAt:   r.taken_at,
+  };
+}
+function logToDb(l, userId) {
+  return {
+    id:         l.id,
+    user_id:    userId,
+    peptide_id: l.peptideId,
+    date:       l.date,
+    session:    l.session,
+    taken:      l.taken,
+    taken_at:   l.takenAt,
+  };
+}
 
 // ── DoseCard ─────────────────────────────────────────────────────────────────
 function DoseCard({ peptide, session, log, onMark, date }) {
@@ -145,13 +192,11 @@ function ScheduleView({ peptides }) {
   return (
     <>
       <div className="sched-table">
-        {/* Day headers */}
         <div className="sched-name-col sched-th" />
         {DAYS.map(d => (
           <div key={d} className={`sched-day-th${d===today?' sched-today':''}`}>{d}</div>
         ))}
 
-        {/* One row per peptide */}
         {active.map(p => (
           <React.Fragment key={p.id}>
             <div className="sched-name-col sched-td">
@@ -261,11 +306,7 @@ function CalculatorView({ peptides }) {
     setResult(null);
   }
 
-  function calculate() {
-    const r = calcUnits(vialMg, bacMl, doseMcg);
-    setResult(r);
-  }
-
+  function calculate() { setResult(calcUnits(vialMg, bacMl, doseMcg)); }
   function reset() { setVialMg(''); setBacMl(''); setDoseMcg(''); setResult(null); setPreset(''); }
 
   const canCalc = vialMg && bacMl && doseMcg;
@@ -324,15 +365,9 @@ function CalculatorView({ peptides }) {
             </div>
             <div className="result-divider"/>
             <div className="result-rows">
-              <div className="result-row">
-                <span>Concentration</span><strong>{result.concMcg} mcg / ml</strong>
-              </div>
-              <div className="result-row">
-                <span>Volume to draw</span><strong>{result.volMl} ml</strong>
-              </div>
-              <div className="result-row">
-                <span>Syringe</span><strong>1ml insulin (100u)</strong>
-              </div>
+              <div className="result-row"><span>Concentration</span><strong>{result.concMcg} mcg / ml</strong></div>
+              <div className="result-row"><span>Volume to draw</span><strong>{result.volMl} ml</strong></div>
+              <div className="result-row"><span>Syringe</span><strong>1ml insulin (100u)</strong></div>
             </div>
             <button className="calc-reset" onClick={reset}>↺ Reset</button>
           </div>
@@ -345,7 +380,6 @@ function CalculatorView({ peptides }) {
 // ── History View ──────────────────────────────────────────────────────────────
 function HistoryView({ logs, peptides }) {
   const sorted = [...logs].sort((a,b) => b.date.localeCompare(a.date) || (a.session==='AM'?-1:1));
-
   const byDate = {};
   sorted.forEach(l => { if (!byDate[l.date]) byDate[l.date]=[]; byDate[l.date].push(l); });
   const dates = Object.keys(byDate).slice(0,30);
@@ -442,20 +476,16 @@ function PeptideModal({ peptide, onSave, onDelete, onClose }) {
   function toggleDay(d) {
     set({ days: form.days.includes(d) ? form.days.filter(x=>x!==d) : [...form.days,d] });
   }
-
   function toggleSession(s) {
-    const next = form.sessions.includes(s)
-      ? form.sessions.filter(x=>x!==s)
-      : [...form.sessions,s];
+    const next = form.sessions.includes(s) ? form.sessions.filter(x=>x!==s) : [...form.sessions,s];
     set({ sessions: next.length===0 ? [s] : next });
   }
-
   function applyPreset(days) { set({ days }); }
 
   function submit() {
-    if (!form.name.trim())              return setErr('Peptide name is required.');
+    if (!form.name.trim())               return setErr('Peptide name is required.');
     if (!form.doseMcg||+form.doseMcg<=0) return setErr('Dose (mcg) must be greater than 0.');
-    if (form.days.length===0)           return setErr('Select at least one day.');
+    if (form.days.length===0)            return setErr('Select at least one day.');
     setErr('');
     onSave({
       id:       peptide?.id || uid(),
@@ -482,7 +512,6 @@ function PeptideModal({ peptide, onSave, onDelete, onClose }) {
         </div>
 
         <div className="modal-body">
-          {/* Color */}
           <div className="color-row">
             {COLORS.map(c=>(
               <button key={c} className={`color-swatch${form.color===c?' on':''}`}
@@ -490,11 +519,9 @@ function PeptideModal({ peptide, onSave, onDelete, onClose }) {
             ))}
           </div>
 
-          {/* Name */}
           <input className="m-input" placeholder="Peptide name (e.g. BPC-157)"
             value={form.name} onChange={e=>set({name:e.target.value})} />
 
-          {/* Dose */}
           <div className="m-label">Dose per injection</div>
           <div className="m-input-unit-row">
             <input className="m-input flex1" type="number" placeholder="250"
@@ -502,7 +529,6 @@ function PeptideModal({ peptide, onSave, onDelete, onClose }) {
             <span className="m-unit">mcg</span>
           </div>
 
-          {/* Vial + BAC */}
           <div className="m-label">Vial reconstitution</div>
           <div className="m-two-col">
             <div className="m-input-unit-row">
@@ -517,29 +543,24 @@ function PeptideModal({ peptide, onSave, onDelete, onClose }) {
             </div>
           </div>
 
-          {/* Live units preview */}
           {liveCalc && (
             <div className="units-preview">
               💉 <strong>{liveCalc.units} units</strong> per dose &nbsp;·&nbsp; {liveCalc.concMcg} mcg/ml
             </div>
           )}
 
-          {/* Schedule presets */}
           <div className="m-label">Schedule</div>
           <div className="chip-row presets">
             {PRESETS.map(p=>(
               <button key={p.label} className="chip preset-chip" onClick={()=>applyPreset(p.days)}>{p.label}</button>
             ))}
           </div>
-
-          {/* Day picker */}
           <div className="chip-row">
             {DAYS.map(d=>(
               <button key={d} className={`chip${form.days.includes(d)?' on':''}`} onClick={()=>toggleDay(d)}>{d}</button>
             ))}
           </div>
 
-          {/* Session */}
           <div className="m-label" style={{marginTop:14}}>Injection time</div>
           <div className="chip-row">
             {SESSIONS.map(s=>(
@@ -549,12 +570,10 @@ function PeptideModal({ peptide, onSave, onDelete, onClose }) {
             ))}
           </div>
 
-          {/* Notes */}
           <div className="m-label">Notes</div>
           <textarea className="m-input m-textarea" placeholder="Optional notes..."
             value={form.notes} onChange={e=>set({notes:e.target.value})}/>
 
-          {/* Active toggle */}
           <div className="toggle-row" onClick={()=>set({active:!form.active})}>
             <span className="toggle-label">Active</span>
             <div className={`toggle${form.active?' on':''}`}><div className="toggle-thumb"/></div>
@@ -582,64 +601,138 @@ function PeptideModal({ peptide, onSave, onDelete, onClose }) {
   );
 }
 
+// ── Login Screen ──────────────────────────────────────────────────────────────
+function LoginScreen() {
+  const [email,   setEmail]   = useState('');
+  const [sent,    setSent]    = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [err,     setErr]     = useState('');
+
+  async function sendLink() {
+    if (!email.trim()) return setErr('Enter your email address.');
+    setLoading(true); setErr('');
+    const { error } = await supabase.auth.signInWithOtp({
+      email: email.trim(),
+      options: { emailRedirectTo: window.location.origin },
+    });
+    setLoading(false);
+    if (error) { setErr(error.message); return; }
+    setSent(true);
+  }
+
+  return (
+    <div className="login-wrap">
+      <div className="login-card">
+        <div className="login-icon">💉</div>
+        <h1 className="login-title">Peptide Tracker</h1>
+        <p className="login-sub">Sign in with your email to sync your protocol across all devices.</p>
+
+        {sent ? (
+          <div className="login-sent">
+            <div className="sent-icon">📬</div>
+            <p className="sent-title">Check your email</p>
+            <p className="sent-sub">We sent a magic link to <strong>{email}</strong>.<br/>Tap it to sign in — no password needed.</p>
+            <button className="login-resend" onClick={()=>setSent(false)}>Use a different email</button>
+          </div>
+        ) : (
+          <>
+            <input
+              className="login-input"
+              type="email"
+              placeholder="your@email.com"
+              value={email}
+              onChange={e=>setEmail(e.target.value)}
+              onKeyDown={e=>e.key==='Enter'&&sendLink()}
+              autoComplete="email"
+              autoFocus
+            />
+            {err && <div className="login-err">{err}</div>}
+            <button className="login-btn" onClick={sendLink} disabled={loading}>
+              {loading ? 'Sending…' : 'Send magic link →'}
+            </button>
+          </>
+        )}
+      </div>
+      <p className="login-footer">v1.0 · Your data is private and encrypted</p>
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function PeptideTracker() {
+  const [session,     setSession]     = useState(null);
   const [peptides,    setPeptides]    = useState([]);
   const [logs,        setLogs]        = useState([]);
   const [view,        setView]        = useState('today');
   const [editPeptide, setEditPeptide] = useState(null);
   const [showAdd,     setShowAdd]     = useState(false);
-  const [mounted,     setMounted]     = useState(false);
+  const [loading,     setLoading]     = useState(true);
 
+  // Auth listener
   useEffect(() => {
-    setPeptides(load('pt_peptides', []));
-    setLogs(load('pt_logs', []));
-    setMounted(true);
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      if (!session) setLoading(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
+      setSession(session);
+      if (!session) { setPeptides([]); setLogs([]); setLoading(false); }
+    });
+    return () => subscription.unsubscribe();
   }, []);
 
-  const persistPeptides = useCallback(next => {
-    setPeptides(next);
-    save('pt_peptides', next);
-  }, []);
+  // Load data when session changes
+  useEffect(() => {
+    if (!session) return;
+    setLoading(true);
+    Promise.all([
+      supabase.from('peptides').select('*').eq('user_id', session.user.id).order('created_at'),
+      supabase.from('logs').select('*').eq('user_id', session.user.id).order('date', { ascending: false }),
+    ]).then(([{ data: pData }, { data: lData }]) => {
+      setPeptides((pData || []).map(dbToPeptide));
+      setLogs((lData || []).map(dbToLog));
+      setLoading(false);
+    });
+  }, [session]);
 
-  const persistLogs = useCallback(next => {
-    setLogs(next);
-    save('pt_logs', next);
-  }, []);
-
-  function markDose(peptideId, date, session, taken) {
+  async function markDose(peptideId, date, session_name, taken) {
+    const userId  = session.user.id;
+    const existing = logs.find(l => l.peptideId===peptideId && l.date===date && l.session===session_name);
+    const logObj = {
+      id:        existing?.id || uid(),
+      peptideId, date,
+      session:   session_name,
+      taken,
+      takenAt:   taken ? new Date().toISOString() : null,
+    };
+    // Optimistic update
     setLogs(prev => {
-      const idx = prev.findIndex(l => l.peptideId===peptideId && l.date===date && l.session===session);
-      let next;
-      if (idx >= 0) {
-        next = prev.map((l,i) => i===idx ? {...l, taken, takenAt: taken ? new Date().toISOString() : null} : l);
-      } else {
-        next = [...prev, { id:uid(), peptideId, date, session, taken, takenAt: taken ? new Date().toISOString() : null }];
-      }
-      save('pt_logs', next);
-      return next;
+      const idx = prev.findIndex(l => l.peptideId===peptideId && l.date===date && l.session===session_name);
+      return idx >= 0 ? prev.map((l,i) => i===idx ? logObj : l) : [...prev, logObj];
     });
+    await supabase.from('logs').upsert(logToDb(logObj, userId));
   }
 
-  function savePeptide(p) {
-    setPeptides(prev => {
-      const next = prev.find(x=>x.id===p.id) ? prev.map(x=>x.id===p.id?p:x) : [...prev,p];
-      save('pt_peptides', next);
-      return next;
-    });
-    setEditPeptide(null);
-    setShowAdd(false);
+  async function savePeptide(p) {
+    const userId = session.user.id;
+    setPeptides(prev => prev.find(x=>x.id===p.id) ? prev.map(x=>x.id===p.id?p:x) : [...prev,p]);
+    setEditPeptide(null); setShowAdd(false);
+    await supabase.from('peptides').upsert(peptideToDb(p, userId));
   }
 
-  function deletePeptide(id) {
-    setPeptides(prev => { const next=prev.filter(x=>x.id!==id); save('pt_peptides',next); return next; });
+  async function deletePeptide(id) {
+    setPeptides(prev => prev.filter(x=>x.id!==id));
     setEditPeptide(null);
+    await supabase.from('peptides').delete().eq('id', id);
+    // logs cascade delete handled by DB
+  }
+
+  async function signOut() {
+    await supabase.auth.signOut();
   }
 
   const showModal = showAdd || !!editPeptide;
   const canFAB    = ['today','schedule','peptides'].includes(view);
-
-  if (!mounted) return null;
 
   return (
     <>
@@ -655,42 +748,57 @@ export default function PeptideTracker() {
         <link rel="apple-touch-icon" href="/icon-192.png"/>
       </Head>
 
-      <div className="app">
-        <header className="topbar">
-          <span className="app-title">💉 Peptide Tracker</span>
-          <span className="ver-badge">v1.0</span>
-        </header>
+      {!session ? (
+        loading ? (
+          <div className="splash"><div className="splash-icon">💉</div><div className="splash-spin"/></div>
+        ) : (
+          <LoginScreen />
+        )
+      ) : (
+        <div className="app">
+          <header className="topbar">
+            <span className="app-title">💉 Peptide Tracker</span>
+            <div className="topbar-right">
+              <span className="ver-badge">v1.0</span>
+              <button className="signout-btn" onClick={signOut} title="Sign out">⎋</button>
+            </div>
+          </header>
 
-        <main className="content">
-          {view==='today'      && <TodayView      peptides={peptides} logs={logs} onMark={markDose}/>}
-          {view==='schedule'   && <ScheduleView   peptides={peptides}/>}
-          {view==='peptides'   && <PeptidesView   peptides={peptides} onEdit={setEditPeptide}/>}
-          {view==='calculator' && <CalculatorView peptides={peptides}/>}
-          {view==='history'    && <HistoryView    logs={logs} peptides={peptides}/>}
-        </main>
+          {loading ? (
+            <div className="loading-data"><div className="splash-spin"/></div>
+          ) : (
+            <main className="content">
+              {view==='today'      && <TodayView      peptides={peptides} logs={logs} onMark={markDose}/>}
+              {view==='schedule'   && <ScheduleView   peptides={peptides}/>}
+              {view==='peptides'   && <PeptidesView   peptides={peptides} onEdit={setEditPeptide}/>}
+              {view==='calculator' && <CalculatorView peptides={peptides}/>}
+              {view==='history'    && <HistoryView    logs={logs} peptides={peptides}/>}
+            </main>
+          )}
 
-        <nav className="bottom-nav">
-          {VIEWS.map(v=>(
-            <button key={v.id} className={`nav-btn${view===v.id?' active':''}`} onClick={()=>setView(v.id)}>
-              <span className="nav-icon">{v.icon}</span>
-              <span className="nav-label">{v.label}</span>
-            </button>
-          ))}
-        </nav>
+          <nav className="bottom-nav">
+            {VIEWS.map(v=>(
+              <button key={v.id} className={`nav-btn${view===v.id?' active':''}`} onClick={()=>setView(v.id)}>
+                <span className="nav-icon">{v.icon}</span>
+                <span className="nav-label">{v.label}</span>
+              </button>
+            ))}
+          </nav>
 
-        {canFAB && (
-          <button className="fab" onClick={()=>setShowAdd(true)} aria-label="Add peptide">＋</button>
-        )}
+          {canFAB && !loading && (
+            <button className="fab" onClick={()=>setShowAdd(true)} aria-label="Add peptide">＋</button>
+          )}
 
-        {showModal && (
-          <PeptideModal
-            peptide={editPeptide||null}
-            onSave={savePeptide}
-            onDelete={deletePeptide}
-            onClose={()=>{setEditPeptide(null);setShowAdd(false);}}
-          />
-        )}
-      </div>
+          {showModal && (
+            <PeptideModal
+              peptide={editPeptide||null}
+              onSave={savePeptide}
+              onDelete={deletePeptide}
+              onClose={()=>{setEditPeptide(null);setShowAdd(false);}}
+            />
+          )}
+        </div>
+      )}
 
       <style global jsx>{`
         *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
@@ -711,6 +819,39 @@ export default function PeptideTracker() {
           -webkit-tap-highlight-color:transparent;
         }
 
+        /* ── Splash / Loading ── */
+        .splash { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100dvh; gap:20px; background:var(--bg); }
+        .splash-icon { font-size:52px; }
+        .splash-spin { width:32px; height:32px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; }
+        .loading-data { display:flex; align-items:center; justify-content:center; flex:1; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+
+        /* ── Login ── */
+        .login-wrap { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100dvh; padding:24px; background:var(--bg); }
+        .login-card { width:100%; max-width:380px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:32px 24px; display:flex; flex-direction:column; gap:16px; }
+        .login-icon { font-size:40px; text-align:center; }
+        .login-title { font-size:22px; font-weight:800; text-align:center; }
+        .login-sub { font-size:14px; color:var(--text-mid); text-align:center; line-height:1.6; }
+        .login-input {
+          width:100%; background:var(--surface2); border:1.5px solid var(--border);
+          border-radius:var(--radius-sm); color:var(--text); padding:14px 16px;
+          font-size:16px; font-family:inherit; outline:none; transition:border-color .2s;
+        }
+        .login-input:focus { border-color:var(--accent); }
+        .login-err { font-size:13px; color:var(--red); font-weight:600; }
+        .login-btn {
+          width:100%; padding:14px; border:none; border-radius:var(--radius-sm);
+          background:var(--accent); color:#fff; font-size:15px; font-weight:700;
+          cursor:pointer; touch-action:manipulation; transition:opacity .15s;
+        }
+        .login-btn:disabled { opacity:.5; cursor:default; }
+        .login-sent { display:flex; flex-direction:column; align-items:center; gap:10px; text-align:center; }
+        .sent-icon { font-size:36px; }
+        .sent-title { font-size:16px; font-weight:700; }
+        .sent-sub { font-size:13px; color:var(--text-mid); line-height:1.6; }
+        .login-resend { background:none; border:none; color:var(--accent-light); font-size:13px; font-weight:600; cursor:pointer; text-decoration:underline; touch-action:manipulation; }
+        .login-footer { font-size:12px; color:var(--text-dim); margin-top:20px; text-align:center; }
+
         /* ── Layout ── */
         .app { display:flex; flex-direction:column; height:100dvh; max-width:480px; margin:0 auto; position:relative; }
         .topbar {
@@ -720,11 +861,13 @@ export default function PeptideTracker() {
           padding-top:calc(14px + env(safe-area-inset-top));
         }
         .app-title { font-size:18px; font-weight:800; letter-spacing:-.02em; }
+        .topbar-right { display:flex; align-items:center; gap:10px; }
         .ver-badge {
           font-size:10px; font-weight:700; letter-spacing:.07em;
           color:var(--accent-light); background:rgba(20,184,166,.12);
           border:1px solid rgba(20,184,166,.3); padding:2px 8px; border-radius:99px;
         }
+        .signout-btn { background:none; border:none; color:var(--text-dim); font-size:18px; cursor:pointer; touch-action:manipulation; padding:4px; }
         .content { flex:1; overflow-y:auto; overflow-x:hidden; padding:16px 16px calc(80px + env(safe-area-inset-bottom)); }
         .bottom-nav {
           display:flex; border-top:1px solid var(--border); background:var(--bg);
@@ -791,15 +934,10 @@ export default function PeptideTracker() {
           transition:all .15s; flex-shrink:0;
         }
         .mark-btn:active { transform:scale(.95); }
-        .mark-btn.taken {
-          background:rgba(34,197,94,.12); border-color:var(--green); color:var(--green); font-size:20px;
-        }
+        .mark-btn.taken { background:rgba(34,197,94,.12); border-color:var(--green); color:var(--green); font-size:20px; }
 
         /* ── Schedule View ── */
-        .sched-table {
-          display:grid; grid-template-columns:auto repeat(7,1fr);
-          gap:2px; margin-bottom:20px; font-size:11px;
-        }
+        .sched-table { display:grid; grid-template-columns:auto repeat(7,1fr); gap:2px; margin-bottom:20px; font-size:11px; }
         .sched-th, .sched-td    { display:flex; align-items:center; justify-content:center; min-height:36px; }
         .sched-name-col         { justify-content:flex-start !important; padding:0 8px 0 0; gap:8px; }
         .sched-th               { font-weight:700; color:var(--text-dim); font-size:10px; text-transform:uppercase; }
@@ -824,11 +962,7 @@ export default function PeptideTracker() {
 
         /* ── Peptides View ── */
         .peptide-list { display:flex; flex-direction:column; gap:2px; }
-        .peptide-row  {
-          display:flex; align-items:center; background:var(--surface); border:1px solid var(--border);
-          border-radius:var(--radius); overflow:hidden; cursor:pointer; transition:background .15s;
-          touch-action:manipulation;
-        }
+        .peptide-row  { display:flex; align-items:center; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; cursor:pointer; transition:background .15s; touch-action:manipulation; }
         .peptide-row:active { background:var(--surface2); }
         .peptide-row.paused { opacity:.55; }
         .peptide-bar  { width:5px; align-self:stretch; flex-shrink:0; }
@@ -846,34 +980,24 @@ export default function PeptideTracker() {
         .calc-heading { font-size:17px; font-weight:800; margin-bottom:6px; }
         .calc-sub     { font-size:13px; color:var(--text-mid); margin-bottom:16px; line-height:1.5; }
         .calc-preset-row { margin-bottom:16px; }
-        .calc-select  {
-          width:100%; background:var(--surface2); border:1.5px solid var(--border); border-radius:var(--radius-sm);
-          color:var(--text); padding:11px 14px; font-size:14px; outline:none; appearance:none;
-        }
+        .calc-select  { width:100%; background:var(--surface2); border:1.5px solid var(--border); border-radius:var(--radius-sm); color:var(--text); padding:11px 14px; font-size:14px; outline:none; appearance:none; }
         .calc-fields  { display:flex; flex-direction:column; gap:12px; margin-bottom:16px; }
         .calc-label   { font-size:12px; font-weight:600; color:var(--text-dim); text-transform:uppercase; letter-spacing:.06em; display:block; margin-bottom:6px; }
         .calc-input-row { display:flex; align-items:center; gap:8px; }
-        .calc-input   {
-          flex:1; background:var(--surface2); border:1.5px solid var(--border); border-radius:var(--radius-sm);
-          color:var(--text); padding:12px 14px; font-size:15px; outline:none; touch-action:manipulation;
-        }
+        .calc-input   { flex:1; background:var(--surface2); border:1.5px solid var(--border); border-radius:var(--radius-sm); color:var(--text); padding:12px 14px; font-size:15px; outline:none; touch-action:manipulation; }
         .calc-input:focus { border-color:var(--accent); }
         .calc-unit-badge { font-size:12px; font-weight:700; color:var(--text-dim); background:var(--surface3); border:1px solid var(--border); padding:4px 10px; border-radius:99px; white-space:nowrap; }
-        .calc-btn {
-          width:100%; padding:14px; border:none; border-radius:var(--radius-sm);
-          background:var(--accent); color:#fff; font-size:15px; font-weight:700;
-          cursor:pointer; touch-action:manipulation; transition:opacity .15s;
-        }
+        .calc-btn     { width:100%; padding:14px; border:none; border-radius:var(--radius-sm); background:var(--accent); color:#fff; font-size:15px; font-weight:700; cursor:pointer; touch-action:manipulation; transition:opacity .15s; }
         .calc-btn:disabled { opacity:.4; cursor:default; }
-        .calc-result     { margin-top:20px; border-top:1px solid var(--border); padding-top:20px; }
-        .result-hero     { text-align:center; margin-bottom:16px; }
-        .result-big      { font-size:64px; font-weight:900; color:var(--accent); line-height:1; }
-        .result-label    { font-size:13px; color:var(--text-mid); font-weight:600; margin-top:4px; }
-        .result-divider  { height:1px; background:var(--border); margin-bottom:14px; }
-        .result-rows     { display:flex; flex-direction:column; gap:10px; margin-bottom:16px; }
-        .result-row      { display:flex; justify-content:space-between; font-size:13px; color:var(--text-mid); }
+        .calc-result  { margin-top:20px; border-top:1px solid var(--border); padding-top:20px; }
+        .result-hero  { text-align:center; margin-bottom:16px; }
+        .result-big   { font-size:64px; font-weight:900; color:var(--accent); line-height:1; }
+        .result-label { font-size:13px; color:var(--text-mid); font-weight:600; margin-top:4px; }
+        .result-divider { height:1px; background:var(--border); margin-bottom:14px; }
+        .result-rows  { display:flex; flex-direction:column; gap:10px; margin-bottom:16px; }
+        .result-row   { display:flex; justify-content:space-between; font-size:13px; color:var(--text-mid); }
         .result-row strong { color:var(--text); font-weight:700; }
-        .calc-reset      { width:100%; padding:10px; border:1.5px solid var(--border); border-radius:var(--radius-sm); background:none; color:var(--text-mid); font-size:13px; font-weight:600; cursor:pointer; touch-action:manipulation; }
+        .calc-reset   { width:100%; padding:10px; border:1.5px solid var(--border); border-radius:var(--radius-sm); background:none; color:var(--text-mid); font-size:13px; font-weight:600; cursor:pointer; touch-action:manipulation; }
 
         /* ── History View ── */
         .hist-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:16px; }
@@ -896,31 +1020,13 @@ export default function PeptideTracker() {
         .hist-entry.missed .hist-status { color:var(--red); }
 
         /* ── Modal ── */
-        .overlay {
-          position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:100;
-          display:flex; align-items:flex-end; justify-content:center;
-          backdrop-filter:blur(4px);
-        }
-        .modal {
-          background:var(--surface); border-radius:var(--radius) var(--radius) 0 0;
-          width:100%; max-width:480px; max-height:92dvh; display:flex; flex-direction:column;
-          padding-bottom:env(safe-area-inset-bottom);
-        }
-        .modal-hdr {
-          display:flex; align-items:center; justify-content:space-between;
-          padding:16px 18px 12px; border-bottom:1px solid var(--border); flex-shrink:0;
-        }
+        .overlay { position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:100; display:flex; align-items:flex-end; justify-content:center; backdrop-filter:blur(4px); }
+        .modal { background:var(--surface); border-radius:var(--radius) var(--radius) 0 0; width:100%; max-width:480px; max-height:92dvh; display:flex; flex-direction:column; padding-bottom:env(safe-area-inset-bottom); }
+        .modal-hdr { display:flex; align-items:center; justify-content:space-between; padding:16px 18px 12px; border-bottom:1px solid var(--border); flex-shrink:0; }
         .modal-title { font-size:17px; font-weight:800; }
         .modal-x     { background:none; border:none; font-size:20px; color:var(--text-mid); cursor:pointer; touch-action:manipulation; }
         .modal-body  { overflow-y:auto; padding:16px 18px; display:flex; flex-direction:column; gap:10px; }
-
-        /* modal inputs */
-        .m-input {
-          width:100%; background:var(--surface2); border:1.5px solid var(--border);
-          border-radius:var(--radius-sm); color:var(--text); padding:12px 14px;
-          font-size:15px; font-family:inherit; outline:none; transition:border-color .2s;
-          touch-action:manipulation;
-        }
+        .m-input { width:100%; background:var(--surface2); border:1.5px solid var(--border); border-radius:var(--radius-sm); color:var(--text); padding:12px 14px; font-size:15px; font-family:inherit; outline:none; transition:border-color .2s; touch-action:manipulation; }
         .m-input:focus { border-color:var(--accent); }
         .m-textarea   { min-height:72px; resize:vertical; }
         .m-label      { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--text-dim); margin-top:4px; }
@@ -928,57 +1034,31 @@ export default function PeptideTracker() {
         .m-unit       { font-size:12px; font-weight:700; color:var(--text-dim); white-space:nowrap; }
         .m-two-col    { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
         .flex1        { flex:1; }
-
-        /* color picker */
         .color-row    { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:4px; }
         .color-swatch { width:28px; height:28px; border-radius:50%; border:3px solid transparent; cursor:pointer; transition:transform .15s; touch-action:manipulation; }
         .color-swatch.on { border-color:#fff; transform:scale(1.2); }
-
-        /* chips */
         .chip-row { display:flex; flex-wrap:wrap; gap:8px; }
         .chip-row.presets { margin-bottom:4px; }
-        .chip {
-          padding:8px 14px; border-radius:99px; border:1.5px solid var(--border);
-          background:transparent; color:var(--text-mid); font-size:13px; font-weight:600;
-          cursor:pointer; touch-action:manipulation; transition:all .15s; white-space:nowrap;
-          -webkit-tap-highlight-color:transparent;
-        }
+        .chip { padding:8px 14px; border-radius:99px; border:1.5px solid var(--border); background:transparent; color:var(--text-mid); font-size:13px; font-weight:600; cursor:pointer; touch-action:manipulation; transition:all .15s; white-space:nowrap; -webkit-tap-highlight-color:transparent; }
         .chip.on { background:rgba(20,184,166,.18); border-color:var(--accent); color:var(--accent-light); }
         .preset-chip { font-size:11px; padding:5px 10px; color:var(--text-dim); border-style:dashed; }
         .preset-chip:active { background:var(--surface2); }
-
-        /* units preview */
-        .units-preview {
-          background:rgba(20,184,166,.08); border:1px solid rgba(20,184,166,.25);
-          border-radius:var(--radius-sm); padding:10px 14px; font-size:13px; color:var(--accent-light);
-        }
-
-        /* toggle */
+        .units-preview { background:rgba(20,184,166,.08); border:1px solid rgba(20,184,166,.25); border-radius:var(--radius-sm); padding:10px 14px; font-size:13px; color:var(--accent-light); }
         .toggle-row   { display:flex; align-items:center; justify-content:space-between; padding:4px 0; cursor:pointer; touch-action:manipulation; }
         .toggle-label { font-size:14px; font-weight:600; }
         .toggle       { width:44px; height:24px; border-radius:99px; background:var(--surface3); border:1px solid var(--border); position:relative; transition:background .2s; }
         .toggle.on    { background:var(--accent); border-color:var(--accent); }
         .toggle-thumb { width:18px; height:18px; border-radius:50%; background:#fff; position:absolute; top:2px; left:2px; transition:left .2s; }
         .toggle.on .toggle-thumb { left:22px; }
-
-        /* modal buttons */
-        .m-btn {
-          width:100%; padding:14px; border-radius:var(--radius-sm); font-size:15px; font-weight:700;
-          cursor:pointer; touch-action:manipulation; transition:opacity .15s; border:none;
-        }
+        .m-btn { width:100%; padding:14px; border-radius:var(--radius-sm); font-size:15px; font-weight:700; cursor:pointer; touch-action:manipulation; transition:opacity .15s; border:none; }
         .m-btn.primary { background:var(--accent); color:#fff; }
         .m-btn.danger  { background:var(--red); color:#fff; }
-        .m-btn.ghost   { background:none; border:1.5px solid var(--border); color:var(--text-dim); }
+        .m-btn.ghost   { background:none; border:1.5px solid var(--border); color:var(--text-mid); }
         .confirm-del-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-
-        /* error */
         .err-msg { font-size:13px; color:var(--red); font-weight:600; }
-
-        /* scrollbar */
         ::-webkit-scrollbar { width:4px; }
         ::-webkit-scrollbar-track { background:transparent; }
         ::-webkit-scrollbar-thumb { background:var(--border); border-radius:99px; }
-
         @media (max-width:380px) {
           .sched-pname { max-width:60px; }
           .result-big  { font-size:52px; }
