@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Head from 'next/head';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -153,8 +153,8 @@ function ScheduleView({ peptides }) {
 
         {/* One row per peptide */}
         {active.map(p => (
-          <>
-            <div key={p.id+'-name'} className="sched-name-col sched-td">
+          <React.Fragment key={p.id}>
+            <div className="sched-name-col sched-td">
               <div className="sched-dot-sm" style={{background:p.color}}/>
               <span className="sched-pname">{p.name}</span>
             </div>
@@ -173,7 +173,7 @@ function ScheduleView({ peptides }) {
                 </div>
               );
             })}
-          </>
+          </React.Fragment>
         ))}
       </div>
 
@@ -652,6 +652,7 @@ export default function PeptideTracker() {
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
         <meta name="apple-mobile-web-app-title" content="Peptides"/>
         <link rel="manifest" href="/manifest.json"/>
+        <link rel="apple-touch-icon" href="/icon-192.png"/>
       </Head>
 
       <div className="app">
