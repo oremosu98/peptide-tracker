@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import Head from 'next/head';
-import { supabase } from '../lib/supabase';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const DAYS     = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
@@ -40,56 +39,14 @@ function calcUnits(vialMg, bacMl, doseMcg) {
   };
 }
 
-// DB row → app object
-function dbToPeptide(r) {
-  return {
-    id:       r.id,
-    name:     r.name,
-    doseMcg:  r.dose_mcg,
-    vialMg:   r.vial_mg,
-    bacMl:    r.bac_ml,
-    days:     r.days     || [],
-    sessions: r.sessions || ['AM'],
-    color:    r.color,
-    active:   r.active,
-    notes:    r.notes || '',
-  };
+// localStorage helpers
+const LS_PEPTIDES = 'pt_peptides';
+const LS_LOGS     = 'pt_logs';
+function lsGet(key, fallback) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
 }
-function peptideToDb(p, userId) {
-  return {
-    id:       p.id,
-    user_id:  userId,
-    name:     p.name,
-    dose_mcg: p.doseMcg,
-    vial_mg:  p.vialMg,
-    bac_ml:   p.bacMl,
-    days:     p.days,
-    sessions: p.sessions,
-    color:    p.color,
-    active:   p.active,
-    notes:    p.notes,
-  };
-}
-function dbToLog(r) {
-  return {
-    id:        r.id,
-    peptideId: r.peptide_id,
-    date:      r.date,
-    session:   r.session,
-    taken:     r.taken,
-    takenAt:   r.taken_at,
-  };
-}
-function logToDb(l, userId) {
-  return {
-    id:         l.id,
-    user_id:    userId,
-    peptide_id: l.peptideId,
-    date:       l.date,
-    session:    l.session,
-    taken:      l.taken,
-    taken_at:   l.takenAt,
-  };
+function lsSet(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
 }
 
 // ── DoseCard ─────────────────────────────────────────────────────────────────
@@ -601,146 +558,26 @@ function PeptideModal({ peptide, onSave, onDelete, onClose }) {
   );
 }
 
-// ── Login Screen ──────────────────────────────────────────────────────────────
-function LoginScreen() {
-  const [email,   setEmail]   = useState('');
-  const [sent,    setSent]    = useState(false);
-  const [code,    setCode]    = useState('');
-  const [loading, setLoading] = useState(false);
-  const [err,     setErr]     = useState('');
-
-  async function sendCode() {
-    if (!email.trim()) return setErr('Enter your email address.');
-    setLoading(true); setErr('');
-    const { error } = await supabase.auth.signInWithOtp({
-      email: email.trim(),
-    });
-    setLoading(false);
-    if (error) { setErr(error.message); return; }
-    setSent(true);
-  }
-
-  async function verifyCode() {
-    const token = code.trim();
-    if (token.length !== 6) return setErr('Enter the 6-digit code from your email.');
-    setLoading(true); setErr('');
-    // try 'email' first (OTP flow), fall back to 'magiclink' if needed
-    let result = await supabase.auth.verifyOtp({
-      email: email.trim(),
-      token,
-      type: 'email',
-    });
-    if (result.error) {
-      result = await supabase.auth.verifyOtp({
-        email: email.trim(),
-        token,
-        type: 'magiclink',
-      });
-    }
-    const { error } = result;
-    setLoading(false);
-    if (error) { setErr('Invalid or expired code. Try again.'); }
-  }
-
-  function reset() {
-    setSent(false);
-    setCode('');
-    setErr('');
-  }
-
-  return (
-    <div className="login-wrap">
-      <div className="login-card">
-        <div className="login-icon">💉</div>
-        <h1 className="login-title">Peptide Tracker</h1>
-        <p className="login-sub">Sign in with your email to sync your protocol across all devices.</p>
-
-        {sent ? (
-          <div className="login-sent">
-            <div className="sent-icon">📬</div>
-            <p className="sent-title">Check your email</p>
-            <p className="sent-sub">We sent a 6-digit code to <strong>{email}</strong>. Enter it below.</p>
-            <input
-              className="login-input otp-input"
-              type="text"
-              inputMode="numeric"
-              pattern="[0-9]*"
-              maxLength={6}
-              placeholder="000000"
-              value={code}
-              onChange={e=>setCode(e.target.value.replace(/\D/g,''))}
-              onKeyDown={e=>e.key==='Enter'&&verifyCode()}
-              autoFocus
-            />
-            {err && <div className="login-err">{err}</div>}
-            <button className="login-btn" onClick={verifyCode} disabled={loading}>
-              {loading ? 'Verifying…' : 'Verify code →'}
-            </button>
-            <button className="login-resend" onClick={reset}>Use a different email</button>
-          </div>
-        ) : (
-          <>
-            <input
-              className="login-input"
-              type="email"
-              placeholder="your@email.com"
-              value={email}
-              onChange={e=>setEmail(e.target.value)}
-              onKeyDown={e=>e.key==='Enter'&&sendCode()}
-              autoComplete="email"
-              autoFocus
-            />
-            {err && <div className="login-err">{err}</div>}
-            <button className="login-btn" onClick={sendCode} disabled={loading}>
-              {loading ? 'Sending…' : 'Send code →'}
-            </button>
-          </>
-        )}
-      </div>
-      <p className="login-footer">v1.0 · Your data is private and encrypted</p>
-    </div>
-  );
-}
-
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function PeptideTracker() {
-  const [session,     setSession]     = useState(null);
   const [peptides,    setPeptides]    = useState([]);
   const [logs,        setLogs]        = useState([]);
   const [view,        setView]        = useState('today');
   const [editPeptide, setEditPeptide] = useState(null);
   const [showAdd,     setShowAdd]     = useState(false);
-  const [loading,     setLoading]     = useState(true);
 
-  // Auth listener
+  // Load from localStorage on mount
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      if (!session) setLoading(false);
-    });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
-      setSession(session);
-      if (!session) { setPeptides([]); setLogs([]); setLoading(false); }
-    });
-    return () => subscription.unsubscribe();
+    setPeptides(lsGet(LS_PEPTIDES, []));
+    setLogs(lsGet(LS_LOGS, []));
   }, []);
 
-  // Load data when session changes
-  useEffect(() => {
-    if (!session) return;
-    setLoading(true);
-    Promise.all([
-      supabase.from('peptides').select('*').eq('user_id', session.user.id).order('created_at'),
-      supabase.from('logs').select('*').eq('user_id', session.user.id).order('date', { ascending: false }),
-    ]).then(([{ data: pData }, { data: lData }]) => {
-      setPeptides((pData || []).map(dbToPeptide));
-      setLogs((lData || []).map(dbToLog));
-      setLoading(false);
-    });
-  }, [session]);
+  // Persist peptides
+  useEffect(() => { lsSet(LS_PEPTIDES, peptides); }, [peptides]);
+  // Persist logs
+  useEffect(() => { lsSet(LS_LOGS, logs); }, [logs]);
 
-  async function markDose(peptideId, date, session_name, taken) {
-    const userId  = session.user.id;
+  function markDose(peptideId, date, session_name, taken) {
     const existing = logs.find(l => l.peptideId===peptideId && l.date===date && l.session===session_name);
     const logObj = {
       id:        existing?.id || uid(),
@@ -749,30 +586,21 @@ export default function PeptideTracker() {
       taken,
       takenAt:   taken ? new Date().toISOString() : null,
     };
-    // Optimistic update
     setLogs(prev => {
       const idx = prev.findIndex(l => l.peptideId===peptideId && l.date===date && l.session===session_name);
       return idx >= 0 ? prev.map((l,i) => i===idx ? logObj : l) : [...prev, logObj];
     });
-    await supabase.from('logs').upsert(logToDb(logObj, userId));
   }
 
-  async function savePeptide(p) {
-    const userId = session.user.id;
+  function savePeptide(p) {
     setPeptides(prev => prev.find(x=>x.id===p.id) ? prev.map(x=>x.id===p.id?p:x) : [...prev,p]);
     setEditPeptide(null); setShowAdd(false);
-    await supabase.from('peptides').upsert(peptideToDb(p, userId));
   }
 
-  async function deletePeptide(id) {
+  function deletePeptide(id) {
     setPeptides(prev => prev.filter(x=>x.id!==id));
+    setLogs(prev => prev.filter(l => l.peptideId!==id));
     setEditPeptide(null);
-    await supabase.from('peptides').delete().eq('id', id);
-    // logs cascade delete handled by DB
-  }
-
-  async function signOut() {
-    await supabase.auth.signOut();
   }
 
   const showModal = showAdd || !!editPeptide;
@@ -792,33 +620,21 @@ export default function PeptideTracker() {
         <link rel="apple-touch-icon" href="/icon-192.png"/>
       </Head>
 
-      {!session ? (
-        loading ? (
-          <div className="splash"><div className="splash-icon">💉</div><div className="splash-spin"/></div>
-        ) : (
-          <LoginScreen />
-        )
-      ) : (
-        <div className="app">
+      <div className="app">
           <header className="topbar">
             <span className="app-title">💉 Peptide Tracker</span>
             <div className="topbar-right">
               <span className="ver-badge">v1.0</span>
-              <button className="signout-btn" onClick={signOut} title="Sign out">⎋</button>
             </div>
           </header>
 
-          {loading ? (
-            <div className="loading-data"><div className="splash-spin"/></div>
-          ) : (
-            <main className="content">
-              {view==='today'      && <TodayView      peptides={peptides} logs={logs} onMark={markDose}/>}
-              {view==='schedule'   && <ScheduleView   peptides={peptides}/>}
-              {view==='peptides'   && <PeptidesView   peptides={peptides} onEdit={setEditPeptide}/>}
-              {view==='calculator' && <CalculatorView peptides={peptides}/>}
-              {view==='history'    && <HistoryView    logs={logs} peptides={peptides}/>}
-            </main>
-          )}
+          <main className="content">
+            {view==='today'      && <TodayView      peptides={peptides} logs={logs} onMark={markDose}/>}
+            {view==='schedule'   && <ScheduleView   peptides={peptides}/>}
+            {view==='peptides'   && <PeptidesView   peptides={peptides} onEdit={setEditPeptide}/>}
+            {view==='calculator' && <CalculatorView peptides={peptides}/>}
+            {view==='history'    && <HistoryView    logs={logs} peptides={peptides}/>}
+          </main>
 
           <nav className="bottom-nav">
             {VIEWS.map(v=>(
@@ -829,7 +645,7 @@ export default function PeptideTracker() {
             ))}
           </nav>
 
-          {canFAB && !loading && (
+          {canFAB && (
             <button className="fab" onClick={()=>setShowAdd(true)} aria-label="Add peptide">＋</button>
           )}
 
@@ -842,7 +658,6 @@ export default function PeptideTracker() {
             />
           )}
         </div>
-      )}
 
       <style global jsx>{`
         *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
@@ -863,40 +678,6 @@ export default function PeptideTracker() {
           -webkit-tap-highlight-color:transparent;
         }
 
-        /* ── Splash / Loading ── */
-        .splash { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100dvh; gap:20px; background:var(--bg); }
-        .splash-icon { font-size:52px; }
-        .splash-spin { width:32px; height:32px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; }
-        .loading-data { display:flex; align-items:center; justify-content:center; flex:1; }
-        @keyframes spin { to { transform:rotate(360deg); } }
-
-        /* ── Login ── */
-        .login-wrap { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100dvh; padding:24px; background:var(--bg); }
-        .login-card { width:100%; max-width:380px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:32px 24px; display:flex; flex-direction:column; gap:16px; }
-        .login-icon { font-size:40px; text-align:center; }
-        .login-title { font-size:22px; font-weight:800; text-align:center; }
-        .login-sub { font-size:14px; color:var(--text-mid); text-align:center; line-height:1.6; }
-        .login-input {
-          width:100%; background:var(--surface2); border:1.5px solid var(--border);
-          border-radius:var(--radius-sm); color:var(--text); padding:14px 16px;
-          font-size:16px; font-family:inherit; outline:none; transition:border-color .2s;
-        }
-        .login-input:focus { border-color:var(--accent); }
-        .login-err { font-size:13px; color:var(--red); font-weight:600; }
-        .login-btn {
-          width:100%; padding:14px; border:none; border-radius:var(--radius-sm);
-          background:var(--accent); color:#fff; font-size:15px; font-weight:700;
-          cursor:pointer; touch-action:manipulation; transition:opacity .15s;
-        }
-        .login-btn:disabled { opacity:.5; cursor:default; }
-        .login-sent { display:flex; flex-direction:column; align-items:center; gap:10px; text-align:center; }
-        .sent-icon { font-size:36px; }
-        .sent-title { font-size:16px; font-weight:700; }
-        .sent-sub { font-size:13px; color:var(--text-mid); line-height:1.6; }
-        .login-resend { background:none; border:none; color:var(--accent-light); font-size:13px; font-weight:600; cursor:pointer; text-decoration:underline; touch-action:manipulation; }
-        .otp-input { text-align:center; font-size:28px; font-weight:700; letter-spacing:8px; }
-        .login-footer { font-size:12px; color:var(--text-dim); margin-top:20px; text-align:center; }
-
         /* ── Layout ── */
         .app { display:flex; flex-direction:column; height:100dvh; max-width:480px; margin:0 auto; position:relative; }
         .topbar {
@@ -912,8 +693,7 @@ export default function PeptideTracker() {
           color:var(--accent-light); background:rgba(20,184,166,.12);
           border:1px solid rgba(20,184,166,.3); padding:2px 8px; border-radius:99px;
         }
-        .signout-btn { background:none; border:none; color:var(--text-dim); font-size:18px; cursor:pointer; touch-action:manipulation; padding:4px; }
-        .content { flex:1; overflow-y:auto; overflow-x:hidden; padding:16px 16px calc(80px + env(safe-area-inset-bottom)); }
+.content { flex:1; overflow-y:auto; overflow-x:hidden; padding:16px 16px calc(80px + env(safe-area-inset-bottom)); }
         .bottom-nav {
           display:flex; border-top:1px solid var(--border); background:var(--bg);
           flex-shrink:0; padding-bottom:env(safe-area-inset-bottom);
