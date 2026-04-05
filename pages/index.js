@@ -25,6 +25,29 @@ const todayStr = () => new Date().toISOString().slice(0,10);
 const todayDay = () => DAYS[((new Date().getDay() + 6) % 7)];
 const fmtTime  = iso => iso ? new Date(iso).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
 const fmtDate  = str => new Date(str+'T12:00:00').toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'});
+const dayOfDate = str => DAYS[((new Date(str+'T12:00:00').getDay() + 6) % 7)];
+
+function isDueOnDate(p, dateStr) {
+  if (p.scheduleType === 'interval') {
+    if (!p.intervalStart || !p.intervalDays) return false;
+    const diff = Math.round((new Date(dateStr+'T12:00:00') - new Date(p.intervalStart+'T12:00:00')) / 86400000);
+    return diff >= 0 && diff % p.intervalDays === 0;
+  }
+  return (p.days || []).includes(dayOfDate(dateStr));
+}
+
+function nextDueStr(p) {
+  if (p.scheduleType !== 'interval' || !p.intervalStart || !p.intervalDays) return null;
+  const today = new Date(todayStr()+'T12:00:00');
+  const start = new Date(p.intervalStart+'T12:00:00');
+  const diff  = Math.round((today - start) / 86400000);
+  if (diff < 0) return p.intervalStart;
+  const rem = diff % p.intervalDays;
+  if (rem === 0) return todayStr();
+  const next = new Date(today);
+  next.setDate(next.getDate() + (p.intervalDays - rem));
+  return next.toISOString().slice(0,10);
+}
 
 function calcUnits(vialMg, bacMl, doseMcg) {
   const v = Number(vialMg), b = Number(bacMl), d = Number(doseMcg);
@@ -74,17 +97,16 @@ function DoseCard({ peptide, session, log, onMark, date }) {
 // ── Today View ───────────────────────────────────────────────────────────────
 function TodayView({ peptides, logs, onMark }) {
   const date = todayStr();
-  const day  = todayDay();
   const dateLabel = new Date().toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long'});
 
-  const scheduled = peptides.filter(p => p.active && p.days.includes(day));
+  const scheduled = peptides.filter(p => p.active && isDueOnDate(p, date));
 
   if (scheduled.length === 0) {
     return (
       <div className="empty-state">
         <div className="empty-emoji">💤</div>
         <p className="empty-title">Rest day</p>
-        <p className="empty-sub">No peptides scheduled for {day}.<br/>Add peptides in the Peptides tab.</p>
+        <p className="empty-sub">No peptides scheduled for today.<br/>Add peptides in the Peptides tab.</p>
       </div>
     );
   }
@@ -133,71 +155,103 @@ function TodayView({ peptides, logs, onMark }) {
 
 // ── Schedule View ─────────────────────────────────────────────────────────────
 function ScheduleView({ peptides }) {
-  const today  = todayDay();
-  const active = peptides.filter(p => p.active);
+  const today   = todayDay();
+  const active  = peptides.filter(p => p.active);
+  const weekly  = active.filter(p => p.scheduleType !== 'interval');
+  const interval= active.filter(p => p.scheduleType === 'interval');
 
   if (active.length === 0) {
     return (
       <div className="empty-state">
         <div className="empty-emoji">📅</div>
         <p className="empty-title">No schedule yet</p>
-        <p className="empty-sub">Add peptides with a weekly schedule to see your plan here.</p>
+        <p className="empty-sub">Add peptides with a schedule to see your plan here.</p>
       </div>
     );
   }
 
   return (
     <>
-      <div className="sched-table">
-        <div className="sched-name-col sched-th" />
-        {DAYS.map(d => (
-          <div key={d} className={`sched-day-th${d===today?' sched-today':''}`}>{d}</div>
-        ))}
-
-        {active.map(p => (
-          <React.Fragment key={p.id}>
-            <div className="sched-name-col sched-td">
-              <div className="sched-dot-sm" style={{background:p.color}}/>
-              <span className="sched-pname">{p.name}</span>
-            </div>
-            {DAYS.map(d => {
-              const on    = p.days.includes(d);
-              const hasAM = on && p.sessions?.includes('AM');
-              const hasPM = on && p.sessions?.includes('PM');
-              return (
-                <div key={p.id+d} className={`sched-td sched-cell${d===today?' sched-today':''}`}>
-                  {on && (
-                    <div className="sched-markers">
-                      {hasAM && <div className="sched-marker" style={{background:p.color}} title="AM"/>}
-                      {hasPM && <div className="sched-marker" style={{background:p.color,opacity:.45}} title="PM"/>}
-                    </div>
-                  )}
+      {weekly.length > 0 && (
+        <>
+          <div className="sched-table">
+            <div className="sched-name-col sched-th" />
+            {DAYS.map(d => (
+              <div key={d} className={`sched-day-th${d===today?' sched-today':''}`}>{d}</div>
+            ))}
+            {weekly.map(p => (
+              <React.Fragment key={p.id}>
+                <div className="sched-name-col sched-td">
+                  <div className="sched-dot-sm" style={{background:p.color}}/>
+                  <span className="sched-pname">{p.name}</span>
                 </div>
-              );
-            })}
-          </React.Fragment>
-        ))}
-      </div>
-
-      <div className="sched-legend">
-        <div className="legend-title">Legend</div>
-        {active.map(p => (
-          <div key={p.id} className="legend-row">
-            <div className="legend-dot" style={{background:p.color}}/>
-            <div className="legend-info">
-              <span className="legend-name">{p.name}</span>
-              <span className="legend-meta">
-                {p.days.join(', ')} · {(p.sessions||['AM']).join(' + ')}
-                {calcUnits(p.vialMg,p.bacMl,p.doseMcg) && ` · ${calcUnits(p.vialMg,p.bacMl,p.doseMcg).units}u`}
-              </span>
-            </div>
+                {DAYS.map(d => {
+                  const on    = (p.days||[]).includes(d);
+                  const hasAM = on && p.sessions?.includes('AM');
+                  const hasPM = on && p.sessions?.includes('PM');
+                  return (
+                    <div key={p.id+d} className={`sched-td sched-cell${d===today?' sched-today':''}`}>
+                      {on && (
+                        <div className="sched-markers">
+                          {hasAM && <div className="sched-marker" style={{background:p.color}} title="AM"/>}
+                          {hasPM && <div className="sched-marker" style={{background:p.color,opacity:.45}} title="PM"/>}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </React.Fragment>
+            ))}
           </div>
-        ))}
-        <div className="legend-opacity-note">
-          <span className="sched-marker-sample" style={{background:'#888'}}/> AM &nbsp;
-          <span className="sched-marker-sample" style={{background:'#888',opacity:.45}}/> PM
+          <div className="legend-opacity-note" style={{marginBottom:14}}>
+            <span className="sched-marker-sample" style={{background:'#888'}}/> AM &nbsp;
+            <span className="sched-marker-sample" style={{background:'#888',opacity:.45}}/> PM
+          </div>
+        </>
+      )}
+
+      {interval.length > 0 && (
+        <div className="sched-legend" style={{marginBottom:14}}>
+          <div className="legend-title">Interval schedule</div>
+          {interval.map(p => {
+            const due   = nextDueStr(p);
+            const isToday = due === todayStr();
+            return (
+              <div key={p.id} className="legend-row">
+                <div className="legend-dot" style={{background:p.color}}/>
+                <div className="legend-info">
+                  <span className="legend-name">{p.name}</span>
+                  <span className="legend-meta">
+                    Every {p.intervalDays} days · {(p.sessions||['AM']).join(' + ')}
+                    {calcUnits(p.vialMg,p.bacMl,p.doseMcg) && ` · ${calcUnits(p.vialMg,p.bacMl,p.doseMcg).units}u`}
+                  </span>
+                </div>
+                <span className={`next-due-badge${isToday?' today':''}`}>
+                  {isToday ? '💉 Today' : `Next: ${fmtDate(due)}`}
+                </span>
+              </div>
+            );
+          })}
         </div>
-      </div>
+      )}
+
+      {weekly.length > 0 && (
+        <div className="sched-legend">
+          <div className="legend-title">Legend</div>
+          {weekly.map(p => (
+            <div key={p.id} className="legend-row">
+              <div className="legend-dot" style={{background:p.color}}/>
+              <div className="legend-info">
+                <span className="legend-name">{p.name}</span>
+                <span className="legend-meta">
+                  {(p.days||[]).join(', ')} · {(p.sessions||['AM']).join(' + ')}
+                  {calcUnits(p.vialMg,p.bacMl,p.doseMcg) && ` · ${calcUnits(p.vialMg,p.bacMl,p.doseMcg).units}u`}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </>
   );
 }
@@ -229,7 +283,7 @@ function PeptidesView({ peptides, onEdit }) {
               <div className="peptide-meta">
                 {p.doseMcg}mcg
                 {calc && <> · <strong>{calc.units}u</strong></>}
-                {' · '}{p.days.join(', ')}
+                {' · '}{p.scheduleType==='interval' ? `Every ${p.intervalDays}d` : (p.days||[]).join(', ')}
                 {' · '}{(p.sessions||['AM']).join(' + ')}
               </div>
               {p.notes && <div className="peptide-notes">{p.notes}</div>}
@@ -409,15 +463,18 @@ function HistoryView({ logs, peptides }) {
 function PeptideModal({ peptide, onSave, onDelete, onClose }) {
   const isNew = !peptide?.id;
   const [form, setForm] = useState({
-    name:     peptide?.name     || '',
-    doseMcg:  peptide?.doseMcg  || '',
-    vialMg:   peptide?.vialMg   || '',
-    bacMl:    peptide?.bacMl    || '',
-    days:     peptide?.days     || [],
-    sessions: peptide?.sessions || ['AM'],
-    color:    peptide?.color    || COLORS[0],
-    active:   peptide?.active   !== false,
-    notes:    peptide?.notes    || '',
+    name:         peptide?.name         || '',
+    doseMcg:      peptide?.doseMcg      || '',
+    vialMg:       peptide?.vialMg       || '',
+    bacMl:        peptide?.bacMl        || '',
+    scheduleType: peptide?.scheduleType || 'weekly',
+    days:         peptide?.days         || [],
+    intervalDays: peptide?.intervalDays || 2,
+    intervalStart:peptide?.intervalStart|| todayStr(),
+    sessions:     peptide?.sessions     || ['AM'],
+    color:        peptide?.color        || COLORS[0],
+    active:       peptide?.active       !== false,
+    notes:        peptide?.notes        || '',
   });
   const [confirmDel, setConfirmDel] = useState(false);
   const [err,        setErr]        = useState('');
@@ -442,19 +499,23 @@ function PeptideModal({ peptide, onSave, onDelete, onClose }) {
   function submit() {
     if (!form.name.trim())               return setErr('Peptide name is required.');
     if (!form.doseMcg||+form.doseMcg<=0) return setErr('Dose (mcg) must be greater than 0.');
-    if (form.days.length===0)            return setErr('Select at least one day.');
+    if (form.scheduleType === 'weekly' && form.days.length===0) return setErr('Select at least one day.');
+    if (form.scheduleType === 'interval' && !form.intervalStart) return setErr('Set a start date for the interval.');
     setErr('');
     onSave({
-      id:       peptide?.id || uid(),
-      name:     form.name.trim(),
-      doseMcg:  +form.doseMcg,
-      vialMg:   +form.vialMg  || 0,
-      bacMl:    +form.bacMl   || 0,
-      days:     form.days,
-      sessions: form.sessions,
-      color:    form.color,
-      active:   form.active,
-      notes:    form.notes.trim(),
+      id:           peptide?.id || uid(),
+      name:         form.name.trim(),
+      doseMcg:      +form.doseMcg,
+      vialMg:       +form.vialMg  || 0,
+      bacMl:        +form.bacMl   || 0,
+      scheduleType: form.scheduleType,
+      days:         form.scheduleType === 'weekly' ? form.days : [],
+      intervalDays: form.scheduleType === 'interval' ? form.intervalDays : null,
+      intervalStart:form.scheduleType === 'interval' ? form.intervalStart : null,
+      sessions:     form.sessions,
+      color:        form.color,
+      active:       form.active,
+      notes:        form.notes.trim(),
     });
   }
 
@@ -507,16 +568,43 @@ function PeptideModal({ peptide, onSave, onDelete, onClose }) {
           )}
 
           <div className="m-label">Schedule</div>
-          <div className="chip-row presets">
-            {PRESETS.map(p=>(
-              <button key={p.label} className="chip preset-chip" onClick={()=>applyPreset(p.days)}>{p.label}</button>
-            ))}
+          <div className="sched-type-toggle">
+            <button className={`stt-btn${form.scheduleType==='weekly'?' on':''}`}
+              onClick={()=>set({scheduleType:'weekly'})}>Weekly</button>
+            <button className={`stt-btn${form.scheduleType==='interval'?' on':''}`}
+              onClick={()=>set({scheduleType:'interval'})}>Every N days</button>
           </div>
-          <div className="chip-row">
-            {DAYS.map(d=>(
-              <button key={d} className={`chip${form.days.includes(d)?' on':''}`} onClick={()=>toggleDay(d)}>{d}</button>
-            ))}
-          </div>
+
+          {form.scheduleType === 'weekly' ? (
+            <>
+              <div className="chip-row presets">
+                {PRESETS.map(p=>(
+                  <button key={p.label} className="chip preset-chip" onClick={()=>applyPreset(p.days)}>{p.label}</button>
+                ))}
+              </div>
+              <div className="chip-row">
+                {DAYS.map(d=>(
+                  <button key={d} className={`chip${form.days.includes(d)?' on':''}`} onClick={()=>toggleDay(d)}>{d}</button>
+                ))}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="m-label" style={{marginTop:4}}>Repeat every</div>
+              <div className="chip-row">
+                {[2,3,4].map(n=>(
+                  <button key={n} className={`chip${form.intervalDays===n?' on':''}`}
+                    onClick={()=>set({intervalDays:n})}>
+                    {n} days
+                  </button>
+                ))}
+              </div>
+              <div className="m-label" style={{marginTop:4}}>First dose date</div>
+              <input className="m-input" type="date"
+                value={form.intervalStart}
+                onChange={e=>set({intervalStart:e.target.value})}/>
+            </>
+          )}
 
           <div className="m-label" style={{marginTop:14}}>Injection time</div>
           <div className="chip-row">
@@ -668,15 +756,21 @@ export default function PeptideTracker() {
           --green:#22c55e; --red:#f87171; --yellow:#fbbf24;
           --radius:14px; --radius-sm:10px;
         }
-        html { -webkit-text-size-adjust:100%; scroll-behavior:smooth; }
+        html { -webkit-text-size-adjust:100%; scroll-behavior:smooth; height:100%; }
         body {
           background:var(--bg); color:var(--text);
-          font-family:'Inter','Segoe UI',system-ui,sans-serif;
+          font-family:-apple-system,'Inter','Segoe UI',system-ui,sans-serif;
           min-height:100vh; line-height:1.6;
           padding-top:env(safe-area-inset-top);
           padding-bottom:env(safe-area-inset-bottom);
           -webkit-tap-highlight-color:transparent;
+          -webkit-font-smoothing:antialiased;
+          overscroll-behavior:none;
         }
+        input, textarea, select, button { font-family:inherit; }
+        input[type="number"] { -moz-appearance:textfield; }
+        input[type="number"]::-webkit-inner-spin-button,
+        input[type="number"]::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
 
         /* ── Layout ── */
         .app { display:flex; flex-direction:column; height:100dvh; max-width:480px; margin:0 auto; position:relative; }
@@ -693,7 +787,7 @@ export default function PeptideTracker() {
           color:var(--accent-light); background:rgba(20,184,166,.12);
           border:1px solid rgba(20,184,166,.3); padding:2px 8px; border-radius:99px;
         }
-.content { flex:1; overflow-y:auto; overflow-x:hidden; padding:16px 16px calc(80px + env(safe-area-inset-bottom)); }
+        .content { flex:1; overflow-y:auto; overflow-x:hidden; padding:16px 16px calc(80px + env(safe-area-inset-bottom)); -webkit-overflow-scrolling:touch; }
         .bottom-nav {
           display:flex; border-top:1px solid var(--border); background:var(--bg);
           flex-shrink:0; padding-bottom:env(safe-area-inset-bottom);
@@ -850,7 +944,7 @@ export default function PeptideTracker() {
         .modal-hdr { display:flex; align-items:center; justify-content:space-between; padding:16px 18px 12px; border-bottom:1px solid var(--border); flex-shrink:0; }
         .modal-title { font-size:17px; font-weight:800; }
         .modal-x     { background:none; border:none; font-size:20px; color:var(--text-mid); cursor:pointer; touch-action:manipulation; }
-        .modal-body  { overflow-y:auto; padding:16px 18px; display:flex; flex-direction:column; gap:10px; }
+        .modal-body  { overflow-y:auto; padding:16px 18px; display:flex; flex-direction:column; gap:10px; -webkit-overflow-scrolling:touch; }
         .m-input { width:100%; background:var(--surface2); border:1.5px solid var(--border); border-radius:var(--radius-sm); color:var(--text); padding:12px 14px; font-size:15px; font-family:inherit; outline:none; transition:border-color .2s; touch-action:manipulation; }
         .m-input:focus { border-color:var(--accent); }
         .m-textarea   { min-height:72px; resize:vertical; }
@@ -881,6 +975,12 @@ export default function PeptideTracker() {
         .m-btn.ghost   { background:none; border:1.5px solid var(--border); color:var(--text-mid); }
         .confirm-del-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
         .err-msg { font-size:13px; color:var(--red); font-weight:600; }
+        .sched-type-toggle { display:flex; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius-sm); padding:3px; gap:3px; }
+        .stt-btn { flex:1; padding:9px; border:none; border-radius:8px; background:none; color:var(--text-mid); font-size:13px; font-weight:700; cursor:pointer; touch-action:manipulation; transition:all .15s; }
+        .stt-btn.on { background:var(--accent); color:#fff; }
+        .next-due-badge { font-size:11px; font-weight:700; color:var(--text-dim); background:var(--surface2); border:1px solid var(--border); padding:3px 10px; border-radius:99px; white-space:nowrap; flex-shrink:0; }
+        .next-due-badge.today { color:var(--accent-light); background:rgba(20,184,166,.12); border-color:rgba(20,184,166,.3); }
+        input[type="date"] { color-scheme:dark; }
         ::-webkit-scrollbar { width:4px; }
         ::-webkit-scrollbar-track { background:transparent; }
         ::-webkit-scrollbar-thumb { background:var(--border); border-radius:99px; }
